@@ -1,0 +1,16 @@
+[project]
+name = "google-ads-mcp-gateway"
+version = "0.1.0"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = [
+  "fastmcp>=3.2.0",
+  "httpx>=0.28.1",
+]
+
+description = "Minimal multi-tenant Google Ads + GA4 MCP Gateway (REST-based)."
+readme = "README.md"
+
+[project.scripts]
+google-ads-mcp-gateway = "ads_mcp_gateway.server:run_server"
+

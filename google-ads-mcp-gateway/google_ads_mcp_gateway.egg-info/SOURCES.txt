@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+ads_mcp_gateway/__init__.py
+ads_mcp_gateway/coordinator.py
+ads_mcp_gateway/ga4_tools.py
+ads_mcp_gateway/ga4_utils.py
+ads_mcp_gateway/server.py
+ads_mcp_gateway/tools.py
+ads_mcp_gateway/utils.py
+google_ads_mcp_gateway.egg-info/PKG-INFO
+google_ads_mcp_gateway.egg-info/SOURCES.txt
+google_ads_mcp_gateway.egg-info/dependency_links.txt
+google_ads_mcp_gateway.egg-info/entry_points.txt
+google_ads_mcp_gateway.egg-info/requires.txt
+google_ads_mcp_gateway.egg-info/top_level.txt

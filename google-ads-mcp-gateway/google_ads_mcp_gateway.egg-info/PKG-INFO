@@ -1,0 +1,58 @@
+Metadata-Version: 2.4
+Name: google-ads-mcp-gateway
+Version: 0.1.0
+Summary: Minimal multi-tenant Google Ads + GA4 MCP Gateway (REST-based).
+License-Expression: Apache-2.0
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: fastmcp>=3.2.0
+Requires-Dist: httpx>=0.28.1
+
+# Google Ads + GA4 MCP Gateway (minimal)
+
+This is a minimal **multi-tenant** MCP server that proxies *read-only* Google Ads and GA4 calls **via REST**.
+
+## Why this exists
+
+The official `googleads/google-ads-mcp` server takes `login-customer-id` from an environment variable, which makes a single shared deployment effectively single-tenant for MCC context. This gateway makes `login_customer_id` **per tool call**.
+
+## Transport
+
+- Uses **FastMCP streamable-http**.
+- MCP endpoint: `http://localhost:8085/mcp` (default).
+
+## Auth model
+
+Astera calls MCP servers with `Authorization: Bearer <access_token>` attached. This server reads that access token from FastMCP and forwards it to Google APIs.
+
+## Tools
+
+### Google Ads
+
+- `list_accessible_customers(login_customer_id?, developer_token?)`
+- `search(customer_id, fields, resource, conditions?, orderings?, limit?, login_customer_id?, developer_token?)`
+
+### GA4 (Google Analytics)
+
+- `ga4_list_accounts()`
+- `ga4_list_properties()`
+- `ga4_run_report(property_id, request)`
+- `ga4_run_realtime_report(property_id, request)`
+
+Notes:
+- `developer_token` can be passed **per-call**. If omitted, the server falls back to `GOOGLE_ADS_DEVELOPER_TOKEN`.
+- `login_customer_id` is optional, but required when querying an advertiser account via MCC.
+
+## Run locally
+
+```powershell
+cd "C:\Code\third-repo\Centerprise\Self Hosted MCPs\google-ads-mcp-gateway"
+py -m pip install -e .
+
+# Optional fallback developer token (recommended to pass per-call in SaaS)
+$env:GOOGLE_ADS_DEVELOPER_TOKEN="YOUR_TOKEN"
+$env:PORT="8085"
+
+py -m ads_mcp_gateway.server
+```
+

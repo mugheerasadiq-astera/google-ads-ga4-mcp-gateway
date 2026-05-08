@@ -1,0 +1,2 @@
+[console_scripts]
+google-ads-mcp-gateway = ads_mcp_gateway.server:run_server
