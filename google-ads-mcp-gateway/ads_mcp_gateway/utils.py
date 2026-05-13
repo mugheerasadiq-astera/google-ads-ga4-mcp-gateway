@@ -33,8 +33,9 @@ def _developer_token(developer_token: Optional[str]) -> str:
     dt = (developer_token or "").strip() or (os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN") or "").strip()
     if not dt:
         raise ToolError(
-            "developer_token is required. Pass developer_token to the tool call, "
-            "or set GOOGLE_ADS_DEVELOPER_TOKEN in the server environment."
+            "developer_token is required for Google Ads API calls. "
+            "Either pass developer_token on this tool call, or set "
+            "GOOGLE_ADS_DEVELOPER_TOKEN in the MCP server environment and restart the gateway."
         )
     return dt
 
@@ -55,6 +56,43 @@ def _headers(token: str, developer_token: str, login_customer_id: Optional[str])
     if login_customer_id:
         headers["login-customer-id"] = login_customer_id
     return headers
+
+
+def enhance_google_ads_http_error_message(
+    *,
+    status_code: int,
+    response_text: str,
+    login_customer_id: Optional[str],
+) -> str:
+    """
+    Append short operator hints for common HTTP failures from googleAds REST.
+
+    Especially: USER_PERMISSION_DENIED when querying a client account without
+    the manager id in the login-customer-id header (maps to our login_customer_id).
+    """
+    base = f"Google Ads API error {status_code}: {response_text}"
+    if status_code != 403:
+        return base
+    low = response_text.lower()
+    if "user_permission_denied" not in low and "user doesn't have permission to access customer" not in low:
+        return base
+    lcid_set = bool((login_customer_id or "").strip())
+    if not lcid_set:
+        return (
+            f"{base}\n\n"
+            "Gateway hint: Google often returns this when `customer_id` is a **client account** "
+            "under a **manager (MCC)**. Retry the same query with **`login_customer_id`** set to "
+            "the **manager** Google Ads customer ID (digits only). That is the MCC id, not the "
+            "client id. If you are not under an MCC, confirm the signed-in user has access to "
+            "this `customer_id` in the Google Ads UI."
+        )
+    return (
+        f"{base}\n\n"
+        "Gateway hint: `login_customer_id` was sent but access was still denied. Confirm the "
+        "OAuth user can open this client under that manager in the Google Ads UI, that "
+        "`login_customer_id` is the correct MCC for this client, and that the developer token "
+        "tier matches the accounts you are calling."
+    )
 
 
 def _parse_search_stream_batches(text: str) -> List[Dict[str, Any]]:
@@ -228,7 +266,7 @@ def coerce_string_list(
     if value is None:
         return None
     if isinstance(value, list):
-        out = [str(x).strip() for x in value if str(x).strip()]
+        out = [str(x).strip() for x in value if x is not None and str(x).strip()]
         return out or None
     s = str(value).strip()
     if not s:
@@ -284,7 +322,11 @@ async def search_google_ads_fields_rest(
     page_size: int = 1000,
     client: Optional[httpx.AsyncClient] = None,
 ) -> List[Dict[str, Any]]:
-    """POST v24/googleAdsFields:search (paginated). Each result is a GoogleAdsField JSON object."""
+    """POST v24/googleAdsFields:search (paginated). Each result is a GoogleAdsField JSON object.
+
+    Query strings are **Field Service** syntax: `SELECT ... WHERE ...` only — **no `FROM` clause**
+    (Google returns `UNEXPECTED_FROM_CLAUSE` if you use `FROM google_ads_field` on this endpoint).
+    """
     token = _token_string()
     url = f"{ADS_API_BASE}/googleAdsFields:search"
     headers = _headers(token, developer_token, login_customer_id)
@@ -314,6 +356,75 @@ async def search_google_ads_fields_rest(
             await client.aclose()
 
 
+async def mutate_google_ads_rest(
+    *,
+    customer_id: str,
+    mutate_operations: List[Dict[str, Any]],
+    validate_only: bool,
+    developer_token: str,
+    login_customer_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    POST {ADS_API_BASE}/customers/{customer_id}/googleAds:mutate.
+
+    On HTTP 4xx/5xx: extracts Google Ads failure messages (including partial-failure
+    details) and raises ToolError with request_id + human-readable errors.
+    On success:  returns the response dict (mutateOperationResponses, requestId, etc.).
+    """
+    token = _token_string()
+    url = f"{ADS_API_BASE}/customers/{customer_id}/googleAds:mutate"
+    body: Dict[str, Any] = {
+        "mutateOperations": mutate_operations,
+        "validateOnly": validate_only,
+        "partialFailure": False,
+    }
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            url, headers=_headers(token, developer_token, login_customer_id), json=body
+        )
+
+    if resp.status_code >= 400:
+        request_id: Optional[str] = None
+        error_msgs: List[str] = []
+        try:
+            payload = resp.json()
+            # Google wraps errors in a list at the top level sometimes
+            items = payload if isinstance(payload, list) else [payload]
+            for item in items:
+                error_block = item.get("error") if isinstance(item, dict) else None
+                if not isinstance(error_block, dict):
+                    continue
+                for detail in error_block.get("details") or []:
+                    if not isinstance(detail, dict):
+                        continue
+                    rid = detail.get("requestId")
+                    if rid:
+                        request_id = rid
+                    for gae in detail.get("errors") or []:
+                        if isinstance(gae, dict) and gae.get("message"):
+                            error_msgs.append(gae["message"])
+                if not error_msgs:
+                    msg = error_block.get("message")
+                    if msg:
+                        error_msgs.append(msg)
+        except Exception:
+            pass
+
+        prefix = f"[requestId={request_id}] " if request_id else ""
+        details = "; ".join(error_msgs) if error_msgs else resp.text
+        raise ToolError(
+            f"Google Ads API error {resp.status_code}: {prefix}{details}"
+        )
+
+    data = resp.json()
+    if isinstance(data, list) and data:
+        data = data[0]
+    return data if isinstance(data, dict) else {"raw": data}
+
+
+_WHERE_PREFIX_RE = re.compile(r"^\s*where\s+", re.IGNORECASE)
+
+
 def build_gaql_query(
     *,
     fields: List[str],
@@ -330,7 +441,10 @@ def build_gaql_query(
     query_parts: List[str] = [f"SELECT {','.join(fields)} FROM {resource}"]
 
     if conditions:
-        query_parts.append(f" WHERE {' AND '.join(conditions)}")
+        # Strip any accidental leading "WHERE " the LLM may have included in a condition fragment.
+        cleaned = [_WHERE_PREFIX_RE.sub("", c).strip() for c in conditions if c.strip()]
+        if cleaned:
+            query_parts.append(f" WHERE {' AND '.join(cleaned)}")
     if orderings:
         query_parts.append(f" ORDER BY {','.join(orderings)}")
     if limit is not None:

@@ -4,6 +4,8 @@ ads_mcp_gateway/__init__.py
 ads_mcp_gateway/coordinator.py
 ads_mcp_gateway/ga4_tools.py
 ads_mcp_gateway/ga4_utils.py
+ads_mcp_gateway/mutate_tools.py
+ads_mcp_gateway/safety.py
 ads_mcp_gateway/server.py
 ads_mcp_gateway/tools.py
 ads_mcp_gateway/utils.py

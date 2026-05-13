@@ -1,6 +1,6 @@
 # Google Ads + GA4 MCP Gateway (minimal)
 
-This is a minimal **multi-tenant** MCP server that proxies *read-only* Google Ads and GA4 calls **via REST**.
+This is a minimal **multi-tenant** MCP server that proxies Google Ads and GA4 calls **via REST**. Read-only by default; write (mutation) tools are available when explicitly enabled by the operator.
 
 ## Why this exists
 
@@ -46,18 +46,32 @@ If you **do not** set the client id/secret, the gateway has no OAuth proxy; use 
 
 ## Tools
 
-### Google Ads
+### Google Ads — read tools
 
-Tool names use an `ads_` prefix so they stay distinct from `ga4_*` on the same `/mcp` endpoint (behavior matches official google-ads-mcp `list_accessible_customers` / `search` / `get_resource_metadata`).
+Tool names use an `ads_` prefix so they stay distinct from `ga4_*` on the same `/mcp` endpoint.
 
 - `ads_list_accessible_customers(login_customer_id?, developer_token?)`
 - `ads_get_resource_metadata(resource_name, login_customer_id?, developer_token?)`
-- `ads_search(customer_id, fields, resource, conditions?, orderings?, limit?, login_customer_id?, developer_token?)`
+- `ads_search(customer_id, fields?, resource?, conditions?, orderings?, limit?, gaql?, query?, login_customer_id?, developer_token?)`
+
+### Google Ads — mutation (write) tools
+
+These tools are registered at all times but **refuse every call** unless `ADS_MCP_ENABLE_MUTATIONS=true` is set in the server environment.
+
+- `ads_pause_resource(customer_id, resource_name, …, validate_only=true, confirm=false)` — pause campaign / ad group / ad
+- `ads_enable_resource(customer_id, resource_name, …, validate_only=true)` — enable paused entity
+- `ads_add_campaign_negative_keyword(customer_id, campaign_id, text, match_type, …, validate_only=true)`
+- `ads_update_campaign_budget(customer_id, budget_id, amount_micros, …, validate_only=true, confirm=false)`
+- `ads_update_ad_group_max_cpc(customer_id, ad_group_id, cpc_bid_micros, …, validate_only=true, confirm=false)`
+- `ads_create_ad_group(customer_id, campaign_id, name, cpc_bid_micros?, …, validate_only=true)`
+- `ads_create_responsive_search_ad(customer_id, ad_group_id, headlines, descriptions, final_urls, …, validate_only=true)`
+
+All write tools default to **`validate_only=true`** — Google validates the operation but does not apply it. Destructive tools additionally require **`confirm=true`** alongside `validate_only=false` to actually apply.
 
 ### GA4 (Google Analytics)
 
 - `ga4_list_accounts()`
-- `ga4_list_properties()`
+- `ga4_list_properties(account_id?)`
 - `ga4_run_report(property_id, request)`
 - `ga4_run_realtime_report(property_id, request)`
 
@@ -65,7 +79,57 @@ Notes:
 - `developer_token` can be passed **per-call**. If omitted, the server falls back to `GOOGLE_ADS_DEVELOPER_TOKEN`.
 - `login_customer_id` is optional, but required when querying an advertiser account via MCC.
 
-If you previously called `list_accessible_customers` / `search` on this gateway, update skills and automation to `ads_list_accessible_customers` / `ads_search`. Add **`ads_get_resource_metadata`** where you used official `get_resource_metadata`.
+## Environment variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `GOOGLE_ADS_MCP_OAUTH_CLIENT_ID` | For hosted OAuth | — | Google OAuth client ID for the FastMCP auth proxy. |
+| `GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET` | For hosted OAuth | — | Google OAuth client secret. |
+| `GOOGLE_ADS_MCP_BASE_URL` | For hosted OAuth | — | Public base URL of this server (no `/mcp` suffix). |
+| `PORT` | No | `8085` | HTTP port to listen on. |
+| `GOOGLE_ADS_DEVELOPER_TOKEN` | No | — | Fallback developer token (pass per-call in SaaS). |
+| `ADS_MCP_ENABLE_MUTATIONS` | No | `false` | Set to `true` to enable write tools. **Disabled by default.** |
+| `ADS_MCP_MAX_DAILY_BUDGET_MICROS` | No | *(none)* | Optional operator ceiling on `ads_update_campaign_budget`. **Not set by default** — users control their own budgets and the LLM asks for confirmation. Only set this if you need an extra server-level cap (e.g. a shared demo environment). |
+| `ADS_MCP_MUTATION_CUSTOMER_ALLOWLIST` | No | *(all)* | CSV of customer IDs that may be mutated. Empty = allow all. |
+| `ADS_MCP_AUDIT_LOG_PATH` | No | stderr | Path to append JSON-lines mutation audit log. |
+
+## Mutations
+
+### Enabling writes
+
+```powershell
+$env:ADS_MCP_ENABLE_MUTATIONS="true"
+# Restrict to specific accounts (optional):
+$env:ADS_MCP_MUTATION_CUSTOMER_ALLOWLIST="1234567890,9876543210"
+# Write an audit trail (recommended):
+$env:ADS_MCP_AUDIT_LOG_PATH="C:\logs\ads_mutations.log"
+# Optional: add a hard budget ceiling only if you need one (e.g. demo/test environment).
+# Do NOT set this in production SaaS — users control their own budgets.
+# $env:ADS_MCP_MAX_DAILY_BUDGET_MICROS="50000000"  # $50/day ceiling
+py -m ads_mcp_gateway.server
+```
+
+### validate_only / confirm workflow
+
+Every write tool has `validate_only: bool = True`. When `validate_only=true`:
+- The operation is sent to Google with `"validateOnly": true`.
+- Google validates the request and returns errors (if any) **without making any change**.
+- Use this to preview every write before applying.
+
+To apply a change, call again with `validate_only=false`.
+For **destructive tools** (pause, budget change, CPC change), also pass `confirm=true`.
+
+The gateway logs every attempt (success or error) to the audit log.
+
+### Safety model in SaaS
+
+In a SaaS deployment the operator cannot know each user's budget scale, so there is **no server-side budget cap by default**. Safety comes from LLM behavior:
+- The LLM always previews with `validate_only=true` first.
+- The LLM spells out consequences in plain language (old value → new value, what stops/starts).
+- The LLM waits for the user to say "yes, apply it" before using `validate_only=false`.
+- The LLM requires the user to explicitly acknowledge destructive operations (`confirm=true`).
+
+`ADS_MCP_MAX_DAILY_BUDGET_MICROS` is available as an optional operator ceiling for environments like demos or sandboxes where you want an extra safety net. Do not set it in production SaaS.
 
 ## Run locally
 
@@ -76,6 +140,8 @@ py -m pip install -e .
 # Optional fallback developer token (recommended to pass per-call in SaaS)
 $env:GOOGLE_ADS_DEVELOPER_TOKEN="YOUR_TOKEN"
 $env:PORT="8085"
+# Enable writes if needed:
+# $env:ADS_MCP_ENABLE_MUTATIONS="true"
 
 py -m ads_mcp_gateway.server
 ```

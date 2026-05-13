@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "google-ads-mcp-gateway"
 version = "0.1.0"
@@ -13,4 +17,12 @@ readme = "README.md"
 
 [project.scripts]
 google-ads-mcp-gateway = "ads_mcp_gateway.server:run_server"
+
+# `skills/` lives next to `ads_mcp_gateway/` for Cursor/Astera docs only — it is not a
+# Python package. Without this, setuptools flat-layout discovery errors with:
+# "Multiple top-level packages discovered: ['skills', 'ads_mcp_gateway']".
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ads_mcp_gateway*"]
+exclude = ["skills*", "tests*", "test*"]
 
